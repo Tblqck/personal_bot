@@ -1,0 +1,17 @@
+from intent_engine import ai_thought
+
+user_id = "user_7416057134"
+
+print("🤖 AI Assistant Started. Press Ctrl+C to quit.\n")
+
+try:
+    while True:
+        message = input("You: ").strip()
+        if not message:
+            continue  # skip empty messages
+
+        response = ai_thought(user_id, message)
+        print("🤖 Assistant:", response)
+
+except KeyboardInterrupt:
+    print("\n👋 Goodbye!")
