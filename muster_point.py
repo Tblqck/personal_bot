@@ -16,36 +16,14 @@ from ayth_script import (
 )
 
 from intent_engine import ai_thought
-import hard_starter
-
-
-# -------------------------------------------------
-# Internal guard: ensure reminder engine starts ONCE
-# -------------------------------------------------
-_engine_started = False
-
-
-def _ensure_reminder_engine():
-    global _engine_started
-
-    if _engine_started:
-        return
-
-    try:
-        hard_starter.ensure_engine_running()
-    except Exception as e:
-        print("⚠️ Reminder engine start failed:", e)
-
-    _engine_started = True
-
+from sync_google_tasks_to_csv import sync_user_tasks_to_csv
 
 # -------------------------------------------------
-# In-memory states (USE user_key consistently)
+# In-memory states
 # -------------------------------------------------
 conversation_state = {}      # user_key -> frame state
-onboarding_pending = {}     # user_key -> True
-timezone_pending = {}       # user_key -> True
-
+onboarding_pending = {}      # user_key -> True
+timezone_pending = {}        # user_key -> True
 
 # -------------------------------------------------
 # Main entry point
@@ -69,7 +47,6 @@ def handle_user_message(user_id, message_text):
     if user_key in timezone_pending:
 
         tz_text = message_text.strip()
-
         try:
             tz = register_user_timezone_first(user_key, tz_text)
         except TypeError:
@@ -80,29 +57,21 @@ def handle_user_message(user_id, message_text):
         return {
             "status": "ok",
             "message": (
-                f" Timezone set to **{tz}**.\n\n"
+                f"Timezone set to **{tz}**.\n\n"
                 "Now connect your Google Tasks account using /connect."
             )
         }
 
     if user_key not in db or "timezone" not in db.get(user_key, {}):
-
         timezone_pending[user_key] = True
-
         return {
             "status": "awaiting",
             "next_slot": "timezone",
             "message": (
-                " Please enter your timezone.\n\n"
-                "Example:\n"
-                "Africa/Lagos"
+                "Please enter your timezone.\n"
+                "Example: Africa/Lagos"
             )
         }
-
-    # -------------------------------------------------
-    # ✅ start background engines ONLY after timezone exists
-    # -------------------------------------------------
-    _ensure_reminder_engine()
 
     # -------------------------------------------------
     # Step 1: /connect onboarding
@@ -110,43 +79,13 @@ def handle_user_message(user_id, message_text):
     if message_text.strip().lower() == "/connect":
         auth_url = generate_auth_url()
         onboarding_pending[user_key] = True
-
         return {
             "status": "ok",
             "message": (
-                " Connect your Google Tasks account (one-time setup)\n\n"
-                " Open this link in your browser:\n"
-                f"{auth_url}\n\n"
-
-                "> Important: Google has NOT yet verified this app.\n"
-                "You will see a warning page. This is normal.\n\n"
-
-                "> Please follow these exact steps:\n\n"
-
-                "1️ On the warning page, click:\n"
-                "   ➜ Advanced\n\n"
-
-                "2️ Then click:\n"
-                "   ➜ Go to Telegram Tasks Bot (unsafe)\n\n"
-
-                "3️ You will be taken to a Google sign-in page.\n"
-                "   Sign in to your Google account.\n\n"
-
-                "4️ Google will show another warning page.\n"
-                "   Click:\n"
-                "   ➜ Continue\n\n"
-
-                "5️ After that, your browser will open a page that looks broken and says:\n"
-                "   “This site can’t be reached – localhost refused to connect”.\n\n"
-
-                " This is expected.\n\n"
-
-                "6️ Copy the FULL URL from your browser address bar\n"
-                "   (the localhost page URL),\n"
-                "   and paste that entire link here in Telegram.\n\n"
-
-                "> I will use that link to finish connecting your Google account."
-            ),
+                "Connect your Google Tasks account (one-time setup)\n\n"
+                f"Open this link in your browser:\n{auth_url}\n\n"
+                "> Follow the steps on-screen to authorize the bot."
+            )
         }
 
     # -------------------------------------------------
@@ -154,7 +93,6 @@ def handle_user_message(user_id, message_text):
     # -------------------------------------------------
     if onboarding_pending.get(user_key):
 
-        # small guard (optional but helpful)
         if "http" not in message_text.lower():
             return {
                 "status": "awaiting",
@@ -167,11 +105,21 @@ def handle_user_message(user_id, message_text):
                 full_url=message_text.strip()
             )
 
+            # Immediately sync Google Tasks for this user
+            try:
+                count = sync_user_tasks_to_csv(user_key)
+            except Exception as e:
+                print(f"❌ Failed to sync tasks immediately for {user_key}: {e}")
+                count = 0
+
             onboarding_pending.pop(user_key, None)
 
             return {
                 "status": "ok",
-                "message": "✅ Google Tasks account connected successfully!"
+                "message": (
+                    f"✅ Google Tasks account connected successfully!\n"
+                    f"🗂 {count} tasks synced from Google Tasks."
+                )
             }
 
         except Exception as e:
@@ -181,7 +129,7 @@ def handle_user_message(user_id, message_text):
             }
 
     # -------------------------------------------------
-    # Step 3: Slot filling
+    # Step 3: Slot filling (creating/updating tasks)
     # -------------------------------------------------
     if user_key in conversation_state:
 
@@ -211,7 +159,6 @@ def handle_user_message(user_id, message_text):
 
         try:
             existing_tasks = list_tasks(user_key)
-
             similar_task = None
 
             for task in existing_tasks:
@@ -220,13 +167,11 @@ def handle_user_message(user_id, message_text):
                     task["title"].lower(),
                     frame["title"].lower()
                 ).ratio()
-
                 if ratio > 0.75:
                     similar_task = task
                     break
 
             if similar_task:
-
                 update_task(
                     task_id=similar_task["id"],
                     title=frame["title"],
@@ -234,9 +179,7 @@ def handle_user_message(user_id, message_text):
                     details=frame.get("details"),
                     user_key=user_key
                 )
-
                 conversation_state.pop(user_key, None)
-
                 return {
                     "status": "ok",
                     "message": f"🔄 Updated task **{frame['title']}**."
@@ -248,9 +191,7 @@ def handle_user_message(user_id, message_text):
                 details=frame.get("details"),
                 user_key=user_key
             )
-
             conversation_state.pop(user_key, None)
-
             return {
                 "status": "ok",
                 "message": f"✅ Task **{frame['title']}** scheduled."
@@ -258,18 +199,16 @@ def handle_user_message(user_id, message_text):
 
         except Exception as e:
             conversation_state.pop(user_key, None)
-
             return {
                 "status": "error",
                 "message": f"❌ Failed to save task: {str(e)}"
             }
 
     # -------------------------------------------------
-    # Step 4: AI intent parsing
+    # Step 4: AI intent parsing (fallback)
     # -------------------------------------------------
     try:
         reply = ai_thought(user_id, message_text)
-
         return {
             "status": "ok",
             "message": reply

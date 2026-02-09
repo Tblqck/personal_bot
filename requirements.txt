@@ -3,3 +3,5 @@ python-telegram-bot>=20.7
 openai>=1.0.0
 pytz
 dateparser
+OpenRouter
+nest_asyncio

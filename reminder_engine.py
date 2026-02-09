@@ -1,205 +1,108 @@
-# reminder_engine.py
+# reminder_engine_openrouter.py
 import os
 import csv
-import json
-import time
-import pytz
-from datetime import datetime, timedelta
-from upload_pending_tasks import upload_pending_tasks
-from intent_engine import ai_thought
-from telegram import Bot
+from datetime import datetime, timezone
+from dotenv import load_dotenv
+from openrouter import OpenRouter
 
-# --- Configuration ---
+# --- Load environment ---
+load_dotenv()
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    raise ValueError("🚨 OPENROUTER_API_KEY not found in .env")
+
+# Initialize OpenRouter client
+client = OpenRouter(api_key=OPENROUTER_API_KEY)
+
 TASKS_CSV = "tasks.csv"
-USERS_DB = "database.json"
-CSV_FIELDS = ["user_id", "title", "details", "due", "status", "google_status", "google_id", "ai_comment"]
+REMINDERS_LOG_CSV = "reminders_sent.csv"
 
-REMINDER_INTERVALS = [30, 10, 1]  # minutes before due time
-MORNING_HOUR = 6  # 6 AM local time
-CHECK_INTERVAL = 60  # seconds
-BOT_TOKEN = os.getenv("BOT_TOKEN2")
-bot = Bot(token=BOT_TOKEN)
 
-# --- Helper functions ---
-def load_users():
-    if not os.path.exists(USERS_DB):
-        return {}
-    with open(USERS_DB, "r", encoding="utf-8") as f:
-        return json.load(f)
-
+# --- Helpers ---
 def load_tasks():
     if not os.path.exists(TASKS_CSV):
         return []
     with open(TASKS_CSV, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
         for r in rows:
-            if "ai_comment" not in r:
-                r["ai_comment"] = ""
+            r.setdefault("ai_comment", "")
+            r.setdefault("google_status", "")
         return rows
 
-def save_tasks(rows):
-    with open(TASKS_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
 
-def human_time(iso_str):
+def get_next_task_per_user(tasks):
+    """Return a dict: user_id -> next upcoming task (soonest due)."""
+    now = datetime.now(timezone.utc)
+    user_tasks = {}
+    for t in tasks:
+        if t.get("google_status") in ["passed", "delete"]:
+            continue
+        if not t.get("due"):
+            continue
+        try:
+            due_dt = datetime.fromisoformat(t["due"].replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if due_dt < now:
+            continue
+        user_id = t["user_id"]
+        if user_id not in user_tasks or due_dt < user_tasks[user_id]["due_dt"]:
+            t["due_dt"] = due_dt
+            user_tasks[user_id] = t
+    return user_tasks
+
+
+def generate_ai_reminder(task_title, ai_comment=""):
+    """Generate a personalized reminder using OpenRouter."""
+    prompt = (
+        f"Write a short, friendly, personalized reminder for the task: '{task_title}'. "
+        f"{ai_comment}"
+    )
     try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        return dt.strftime("%A, %d %b %Y at %I:%M %p")
-    except Exception:
-        return iso_str
-
-# --- Reminder state ---
-sent_reminders = {}  # user_id -> {task_key -> [intervals_sent]}
-
-# --- Telegram message sender ---
-def send_message(user_id, text):
-    try:
-        bot.send_message(chat_id=user_id, text=text)
+        completion = client.chat.send(
+            model="openai/gpt-5.2",
+            messages=[{"role": "user", "content": prompt}],
+            stream=False
+        )
+        message = completion.choices[0].message.content.strip()
+        return message
     except Exception as e:
-        print(f"❌ Failed to send message to {user_id}: {e}")
+        print(f"❌ AI reminder generation failed: {e}")
+        return f"Reminder: {task_title}"  # fallback
 
-# --- Morning summary ---
-def send_morning_summary(user_id, tasks):
-    if not tasks:
+
+def log_reminder(user_id, task_title, ai_message, minutes_left):
+    """Append reminder info to CSV."""
+    file_exists = os.path.exists(REMINDERS_LOG_CSV)
+    with open(REMINDERS_LOG_CSV, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["timestamp_utc", "user_id", "task_title", "minutes_left", "ai_message"])
+        writer.writerow([datetime.now(timezone.utc).isoformat(), user_id, task_title, int(minutes_left), ai_message])
+
+
+# --- Main reminder logic ---
+def run_reminder_ai():
+    tasks = load_tasks()
+    next_tasks = get_next_task_per_user(tasks)
+    now = datetime.now(timezone.utc)
+
+    if not next_tasks:
+        print("No upcoming tasks found.")
         return
 
-    message_lines = ["🌅 Good morning! Here’s your schedule for today:\n"]
+    for user_id, task in next_tasks.items():
+        due_dt = task["due_dt"]
+        minutes_left = (due_dt - now).total_seconds() / 60
 
-    for t in tasks:
-        due = human_time(t["due"])
-        details = t.get("details") or ""
-        ai_comment = t.get("ai_comment") or ""
+        # Generate personalized AI reminder using OpenRouter
+        ai_message = generate_ai_reminder(task["title"], task.get("ai_comment", ""))
 
-        block = f"• {t['title']}\n  → {due}"
-        if details:
-            block += f"\n  → {details}"
-        if ai_comment:
-            block += f"\n  → {ai_comment}"
-
-        message_lines.append(block)
-
-    send_message(user_id, "\n\n".join(message_lines))
+        # Print and log
+        print(f"⏰ {user_id}: {ai_message} (due in {int(minutes_left)} min)")
+        log_reminder(user_id, task["title"], ai_message, minutes_left)
 
 
-# --- Smart continuous reminders ---
-def check_and_send_reminders():
-    users = load_users()
-    tasks = load_tasks()
-
-    now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
-
-    rows_updated = False
-
-    for user_id, info in users.items():
-        tz_name = info.get("timezone", "UTC")
-
-        try:
-            user_tz = pytz.timezone(tz_name)
-        except Exception:
-            user_tz = pytz.utc
-
-        now = now_utc.astimezone(user_tz)
-
-        # ---- Morning summary (run once per day per user)
-        if now.hour == MORNING_HOUR and now.minute == 0:
-            today_tasks = [
-                t for t in tasks
-                if t["user_id"] == str(user_id)
-                and t["google_status"] not in ["passed", "delete"]
-            ]
-
-            send_morning_summary(user_id, today_tasks)
-
-            sent_reminders.setdefault(user_id, {})
-            for t in today_tasks:
-                task_key = make_task_key(t)
-                sent_reminders[user_id][task_key] = []
-
-        # ---- Per task reminders
-        for t in tasks:
-            if t["user_id"] != str(user_id):
-                continue
-
-            if t["google_status"] in ["passed", "delete"]:
-                continue
-
-            if not t.get("due"):
-                continue
-
-            try:
-                due_dt = datetime.fromisoformat(
-                    t["due"].replace("Z", "+00:00")
-                )
-
-                if due_dt.tzinfo is None:
-                    due_dt = pytz.utc.localize(due_dt)
-
-                due_local = due_dt.astimezone(user_tz)
-
-            except Exception:
-                continue
-
-            task_key = make_task_key(t)
-
-            # ---- passed
-            if now >= due_local:
-                if t["google_status"] != "passed":
-                    t["google_status"] = "passed"
-                    rows_updated = True
-                    print(f"✅ Task '{t['title']}' passed for {user_id}")
-                continue
-
-            minutes_left = (due_local - now).total_seconds() / 60
-
-            sent_intervals = sent_reminders \
-                .setdefault(user_id, {}) \
-                .setdefault(task_key, [])
-
-            for interval in REMINDER_INTERVALS:
-                # IMPORTANT FIX:
-                # only fire when we cross the window
-                if (
-                    interval not in sent_intervals
-                    and minutes_left <= interval
-                    and minutes_left > interval - 1
-                ):
-                    send_message(
-                        user_id,
-                        f"⏰ Reminder: '{t['title']}' is due in {int(minutes_left)} minutes.\n"
-                        f"{t.get('ai_comment','')}"
-                    )
-                    sent_intervals.append(interval)
-
-    if rows_updated:
-        save_tasks(tasks)
-        upload_pending_tasks()
-
-
-def make_task_key(t):
-    # stable key even if titles repeat
-    return f"{t.get('google_id','')}|{t.get('title','')}|{t.get('due','')}"
-
-
-# --- Scheduler loop ---
-def run_reminder_loop():
-    print("🕒 Reminder engine running...")
-    while True:
-        try:
-            check_and_send_reminders()
-        except Exception as e:
-            print(f"❌ Error in reminder loop: {e}")
-        time.sleep(CHECK_INTERVAL)
-
-
-# --------------------------------------------------
-# Public entry for hard_starter.py
-# --------------------------------------------------
-def run_forever():
-    run_reminder_loop()
-
-
-# --- Direct run support ---
+# --- Standalone run ---
 if __name__ == "__main__":
-    run_forever()
+    run_reminder_ai()

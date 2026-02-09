@@ -1,145 +1,246 @@
-import csv
+# hard_starter.py
+
 import os
-import sys
-import subprocess
-from datetime import datetime, timedelta
-import time
-import threading
+import csv
+from datetime import datetime, timezone
+from dotenv import load_dotenv
+from openrouter import OpenRouter
 
-from sync_google_tasks_to_csv import sync_user_tasks_to_csv
+# -----------------------
+# Config
+# -----------------------
 
-MOTION_CSV = "motion.csv"
-FIELDS = ["engine", "status", "pid", "started_at"]
-ENGINE_NAME = "reminder_engine"
-ENGINE_FILE = os.path.join(os.path.dirname(__file__), "reminder_engine.py")
+TASKS_CSV = "tasks.csv"
+REMINDERS_QUEUE_CSV = "reminders_sent.csv"
 
-DATABASE_FILE = os.path.join(os.path.dirname(__file__), "database.json")  # user DB
+REMINDER_MINUTES = {30, 10, 1}
+WINDOW_SECONDS = 30   # allow small clock drift (±30s)
+
+# -----------------------
+# Env / client
+# -----------------------
+
+load_dotenv()
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    raise ValueError("OPENROUTER_API_KEY not found in .env")
+
+client = OpenRouter(api_key=OPENROUTER_API_KEY)
 
 
-# ----------------------
-# Motion CSV helpers
-# ----------------------
-def ensure_motion_file():
-    if not os.path.exists(MOTION_CSV):
-        with open(MOTION_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=FIELDS)
-            writer.writeheader()
+# -----------------------
+# CSV helpers
+# -----------------------
 
+def load_tasks():
+    if not os.path.exists(TASKS_CSV):
+        return []
 
-def read_state():
-    ensure_motion_file()
-    with open(MOTION_CSV, newline="", encoding="utf-8") as f:
+    with open(TASKS_CSV, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
+
     for r in rows:
-        if r.get("engine") == ENGINE_NAME:
-            return r
-    return None
+        r.setdefault("ai_comment", "")
+        r.setdefault("google_status", "")
+
+    return rows
 
 
-def write_state(status, pid):
-    ensure_motion_file()
-    with open(MOTION_CSV, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    rows = [r for r in rows if r.get("engine") != ENGINE_NAME]
-    rows.append({
-        "engine": ENGINE_NAME,
-        "status": status,
-        "pid": str(pid or ""),
-        "started_at": datetime.utcnow().isoformat()
-    })
-    with open(MOTION_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDS)
+def save_tasks(rows):
+    if not rows:
+        return
+
+    fieldnames = rows[0].keys()
+
+    with open(TASKS_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
 
-def is_pid_alive(pid):
-    try:
-        pid = int(pid)
-    except Exception:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except Exception:
-        return False
+def load_existing_queue_keys():
+    if not os.path.exists(REMINDERS_QUEUE_CSV):
+        return set()
+
+    with open(REMINDERS_QUEUE_CSV, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    keys = set()
+    for r in rows:
+        k = f"{r.get('user_id')}|{r.get('task_key')}|{r.get('due')}|{r.get('trigger_minute')}"
+        keys.add(k)
+
+    return keys
 
 
-# ----------------------
-# Start reminder engine
-# ----------------------
-def start_reminder_engine():
-    row = read_state()
-    if row and row.get("status") == "on":
-        pid = row.get("pid")
-        if pid and is_pid_alive(pid):
-            return  # already running
+def append_to_queue(row):
+    fieldnames = [
+        "timestamp_utc",
+        "user_id",
+        "task_key",
+        "task_title",
+        "due",
+        "minutes_left",
+        "trigger_minute",
+        "ai_message"
+    ]
 
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+    file_exists = os.path.exists(REMINDERS_QUEUE_CSV)
 
-    p = subprocess.Popen(
-        [sys.executable, ENGINE_FILE],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=creationflags
+    with open(REMINDERS_QUEUE_CSV, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+# -----------------------
+# Core logic
+# -----------------------
+
+def generate_ai_reminder(task_title, ai_comment="", minutes_left=None):
+
+    prompt = (
+        "Write one short, natural and friendly reminder sentence for this task.\n"
+        "Do not use markdown, stars, quotes or emojis.\n"
+        f"Task: {task_title}"
     )
-    write_state("on", p.pid)
+
+    if ai_comment:
+        prompt += "\nExtra note: " + ai_comment
+
+    if minutes_left is not None:
+        if minutes_left <= 1:
+            prompt += "\nIt is due in one minute."
+        else:
+            prompt += f"\nIt is due in {int(minutes_left)} minutes."
+
+    try:
+        completion = client.chat.send(
+            model="openai/gpt-5.2",
+            messages=[{"role": "user", "content": prompt}],
+            stream=False
+        )
+
+        text = completion.choices[0].message.content.strip()
+        return text.replace("*", "").replace("_", "").replace("`", "")
+
+    except Exception as e:
+        print("AI reminder generation failed:", e)
+        return f"Friendly reminder: {task_title}"
 
 
-# ----------------------
-# Daily Google Task Sync
-# ----------------------
-def daily_google_task_sync():
+def should_trigger(minutes_left, target_minute):
     """
-    Runs once per day at 00:00 user local time for all users in DB.
+    Fire only when we are inside a small window around
+    the target minute (30, 10, 1).
     """
-    while True:
-        now = datetime.now()
-        # next run is today at 00:00 or tomorrow if already passed
-        next_run = datetime.combine(now.date(), datetime.min.time())
-        if now >= next_run:
-            next_run += timedelta(days=1)
+    target_seconds = target_minute * 60
+    current_seconds = int(minutes_left * 60)
 
-        wait_seconds = (next_run - now).total_seconds()
-        time.sleep(wait_seconds)  # sleep until next run
+    return abs(current_seconds - target_seconds) <= WINDOW_SECONDS
+
+
+# -----------------------
+# Main producer
+# -----------------------
+
+def run_reminder_ai():
+
+    tasks = load_tasks()
+    existing_keys = load_existing_queue_keys()
+
+    now = datetime.now(timezone.utc)
+
+    produced = 0
+    tasks_changed = False
+
+    for task in tasks:
+
+        if task.get("google_status") in ("passed", "delete"):
+            continue
+
+        if not task.get("due"):
+            continue
 
         try:
-            # load all users
-            import json
-            if os.path.exists(DATABASE_FILE):
-                with open(DATABASE_FILE, "r", encoding="utf-8") as f:
-                    db = json.load(f)
-            else:
-                db = {}
+            due_dt = datetime.fromisoformat(
+                task["due"].replace("Z", "+00:00")
+            )
+        except Exception:
+            continue
 
-            for user_key in db.keys():
-                try:
-                    count = sync_user_tasks_to_csv(user_key)
-                    print(f"✅ Synced {count} tasks for {user_key}")
-                except Exception as e:
-                    print(f"❌ Failed to sync {user_key}: {e}")
+        # -------------------
+        # mark passed tasks
+        # -------------------
+        if due_dt <= now:
+            if task.get("google_status") != "passed":
+                task["google_status"] = "passed"
+                tasks_changed = True
+            continue
 
-        except Exception as e:
-            print(f"❌ Daily sync error: {e}")
+        user_id = task.get("user_id")
+        if not user_id:
+            continue
+
+        minutes_left = (due_dt - now).total_seconds() / 60
+
+        # -------------------
+        # only 30, 10, 1 min
+        # -------------------
+        trigger_minute = None
+        for m in REMINDER_MINUTES:
+            if should_trigger(minutes_left, m):
+                trigger_minute = m
+                break
+
+        if trigger_minute is None:
+            continue
+
+        task_key = task.get("google_id") or task.get("title")
+
+        dedup_key = (
+            f"{user_id}|{task_key}|{task.get('due')}|{trigger_minute}"
+        )
+
+        if dedup_key in existing_keys:
+            continue
+
+        ai_message = generate_ai_reminder(
+            task.get("title", ""),
+            task.get("ai_comment", ""),
+            minutes_left
+        )
+
+        append_to_queue({
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "user_id": user_id,
+            "task_key": task_key,
+            "task_title": task.get("title", ""),
+            "due": task.get("due", ""),
+            "minutes_left": int(round(minutes_left)),
+            "trigger_minute": trigger_minute,
+            "ai_message": ai_message
+        })
+
+        existing_keys.add(dedup_key)
+        produced += 1
+
+        print(
+            f"Queued {trigger_minute}min reminder for {user_id} -> {task.get('title')}"
+        )
+
+    if tasks_changed:
+        save_tasks(tasks)
+        print("Updated passed tasks in tasks.csv")
+
+    print(f"Produced {produced} reminder(s).")
 
 
-# ----------------------
-# Ensure engine + schedule daily sync
-# ----------------------
-def ensure_engine_running():
-    start_reminder_engine()
-    # start daily sync in background
-    t = threading.Thread(target=daily_google_task_sync, daemon=True)
-    t.start()
+# -----------------------
+# Stand-alone
+# -----------------------
 
-
-# ----------------------
-# CLI usage
-# ----------------------
 if __name__ == "__main__":
-    ensure_engine_running()
-    # keep process alive
-    while True:
-        time.sleep(60)
+    run_reminder_ai()
