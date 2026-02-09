@@ -40,19 +40,17 @@ def _ensure_reminder_engine():
 
 
 # -------------------------------------------------
-# In-memory states
+# In-memory states (USE user_key consistently)
 # -------------------------------------------------
-conversation_state = {}      # user_id -> frame state
-onboarding_pending = {}     # google oauth
-timezone_pending = {}       # user_id -> True
+conversation_state = {}      # user_key -> frame state
+onboarding_pending = {}     # user_key -> True
+timezone_pending = {}       # user_key -> True
 
 
 # -------------------------------------------------
 # Main entry point
 # -------------------------------------------------
 def handle_user_message(user_id, message_text):
-
-    _ensure_reminder_engine()
 
     user_key = f"user_{user_id}"
 
@@ -68,17 +66,16 @@ def handle_user_message(user_id, message_text):
     # -------------------------------------------------
     # STEP 0 – timezone onboarding (NON BLOCKING)
     # -------------------------------------------------
-    if user_id in timezone_pending:
+    if user_key in timezone_pending:
 
         tz_text = message_text.strip()
 
         try:
             tz = register_user_timezone_first(user_key, tz_text)
         except TypeError:
-            # fallback if your function only expects one arg
             tz = register_user_timezone_first(user_key, tz_text)
 
-        timezone_pending.pop(user_id, None)
+        timezone_pending.pop(user_key, None)
 
         return {
             "status": "ok",
@@ -90,7 +87,7 @@ def handle_user_message(user_id, message_text):
 
     if user_key not in db or "timezone" not in db.get(user_key, {}):
 
-        timezone_pending[user_id] = True
+        timezone_pending[user_key] = True
 
         return {
             "status": "awaiting",
@@ -103,13 +100,17 @@ def handle_user_message(user_id, message_text):
         }
 
     # -------------------------------------------------
+    # ✅ start background engines ONLY after timezone exists
+    # -------------------------------------------------
+    _ensure_reminder_engine()
+
+    # -------------------------------------------------
     # Step 1: /connect onboarding
     # -------------------------------------------------
     if message_text.strip().lower() == "/connect":
         auth_url = generate_auth_url()
-        onboarding_pending[user_id] = True
+        onboarding_pending[user_key] = True
 
-        
         return {
             "status": "ok",
             "message": (
@@ -151,7 +152,14 @@ def handle_user_message(user_id, message_text):
     # -------------------------------------------------
     # Step 2: OAuth redirect URL handling
     # -------------------------------------------------
-    if onboarding_pending.get(user_id):
+    if onboarding_pending.get(user_key):
+
+        # small guard (optional but helpful)
+        if "http" not in message_text.lower():
+            return {
+                "status": "awaiting",
+                "message": "Please paste the full redirect URL from your browser."
+            }
 
         try:
             register_user_via_url(
@@ -159,7 +167,7 @@ def handle_user_message(user_id, message_text):
                 full_url=message_text.strip()
             )
 
-            onboarding_pending.pop(user_id, None)
+            onboarding_pending.pop(user_key, None)
 
             return {
                 "status": "ok",
@@ -175,9 +183,9 @@ def handle_user_message(user_id, message_text):
     # -------------------------------------------------
     # Step 3: Slot filling
     # -------------------------------------------------
-    if user_id in conversation_state:
+    if user_key in conversation_state:
 
-        state = conversation_state[user_id]
+        state = conversation_state[user_key]
         frame = state["frame"]
         awaiting = state.get("awaiting")
 
@@ -227,7 +235,7 @@ def handle_user_message(user_id, message_text):
                     user_key=user_key
                 )
 
-                conversation_state.pop(user_id, None)
+                conversation_state.pop(user_key, None)
 
                 return {
                     "status": "ok",
@@ -241,7 +249,7 @@ def handle_user_message(user_id, message_text):
                 user_key=user_key
             )
 
-            conversation_state.pop(user_id, None)
+            conversation_state.pop(user_key, None)
 
             return {
                 "status": "ok",
@@ -249,7 +257,7 @@ def handle_user_message(user_id, message_text):
             }
 
         except Exception as e:
-            conversation_state.pop(user_id, None)
+            conversation_state.pop(user_key, None)
 
             return {
                 "status": "error",

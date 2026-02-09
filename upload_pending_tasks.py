@@ -11,9 +11,18 @@ from time_fixer_ai import fix_time_with_model
 
 TASKS_CSV = "tasks.csv"
 USERS_DB = "database.json"
-CSV_FIELDS = ["user_id", "title", "details", "due", "status", "google_status", "google_id","ai_comment"]
+CSV_FIELDS = ["user_id", "title", "details", "due", "status", "google_status", "google_id", "ai_comment"]
 
 TEST_MODE = False  # set True to skip Google API calls for testing
+
+
+# ----------------------------
+# small logger helper
+# ----------------------------
+def log(msg, silent):
+    if not silent:
+        print(msg)
+
 
 # ----------------------------
 # Get user info (timezone)
@@ -28,6 +37,7 @@ def get_user_info(user_id, default_timezone="UTC"):
     except Exception:
         return {"timezone": default_timezone}
 
+
 # ----------------------------
 # Fix due date
 # ----------------------------
@@ -40,20 +50,20 @@ def fix_due(due_str, user_tz):
         fixed_due = fix_time_from_text(due_str, user_timezone=user_tz)
         if fixed_due:
             return fixed_due
-    # fallback to AI model
     return fix_time_with_model(due_str, user_timezone=user_tz)
+
 
 # ----------------------------
 # Main function
 # ----------------------------
-def upload_pending_tasks():
+def upload_pending_tasks(silent=False):
+
     if not os.path.exists(TASKS_CSV):
-        print("tasks.csv not found.")
+        log("tasks.csv not found.", silent)
         return
 
     updated_any = False
 
-    # Read CSV
     with open(TASKS_CSV, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
@@ -70,13 +80,11 @@ def upload_pending_tasks():
         google_id = row.get("google_id")
 
         if not user_id or not title:
-            print(f"⚠️ Skipping incomplete task: {row}")
+            log(f"⚠️ Skipping incomplete task: {row}", silent)
             new_rows.append(row)
             continue
 
-        # User timezone
         tz = get_user_info(user_id).get("timezone", "UTC")
-        now = datetime.now(pytz.timezone(tz))
 
         # ----------------------------
         # Fix invalid or missing due
@@ -88,7 +96,6 @@ def upload_pending_tasks():
         except Exception:
             due_dt = None
 
-        # If due is missing or invalid, fix it
         if not due_dt:
             fixed_due = fix_due(due, tz)
             if fixed_due:
@@ -105,61 +112,79 @@ def upload_pending_tasks():
             # ----------------------------
             if google_status == "delete" and google_id:
                 if not TEST_MODE:
-                    print(f"🗑 Deleting task {title} ({google_id}) for {user_id}")
+                    log(f"🗑 Deleting task {title} ({google_id}) for {user_id}", silent)
                     delete_task(google_id, user_id)
                     updated_any = True
-                print(f"✅ Deleted task removed from CSV: {title}")
-                continue  # remove from CSV
+
+                log(f"✅ Deleted task removed from CSV: {title}", silent)
+                continue
 
             # ----------------------------
             # COMPLETE tasks ("passed")
             # ----------------------------
             elif google_status == "passed" and google_id:
                 if not TEST_MODE:
-                    print(f"✅ Completing task {title} ({google_id}) for {user_id}")
+                    log(f"✅ Completing task {title} ({google_id}) for {user_id}", silent)
                     complete_task(google_id, user_id)
                     updated_any = True
-                print(f"✅ Task completed and removed from CSV: {title}")
-                continue  # remove from CSV
+
+                log(f"✅ Task completed and removed from CSV: {title}", silent)
+                continue
 
             # ----------------------------
             # PENDING tasks → upload / update
             # ----------------------------
             elif google_status == "pending":
+
                 if google_id:
                     if not TEST_MODE:
-                        print(f"🔄 Updating task {title} ({google_id}) for {user_id}")
-                        resp = update_task(google_id, user_id, title=title, details=details, due=due)
+                        log(f"🔄 Updating task {title} ({google_id}) for {user_id}", silent)
+
+                        resp = update_task(
+                            google_id,
+                            user_id,
+                            title=title,
+                            details=details,
+                            due=due
+                        )
+
                         if resp.get("id"):
                             row["google_status"] = "done"
                             updated_any = True
-                            print(f"✅ Updated task (Google ID: {resp['id']})")
+                            log(f"✅ Updated task (Google ID: {resp['id']})", silent)
                         else:
-                            print("❌ Update failed:", resp)
+                            log(f"❌ Update failed: {resp}", silent)
+
                 else:
                     if not TEST_MODE:
-                        print(f"⬆ Uploading new task for {user_id}: {title}")
-                        resp = create_task(title=title, due=due, user_key=user_id, details=details)
+                        log(f"⬆ Uploading new task for {user_id}: {title}", silent)
+
+                        resp = create_task(
+                            title=title,
+                            due=due,
+                            user_key=user_id,
+                            details=details
+                        )
+
                         if resp.get("id"):
                             row["google_status"] = "done"
                             row["google_id"] = resp["id"]
                             updated_any = True
-                            print(f"✅ Uploaded task (Google ID: {resp['id']})")
+                            log(f"✅ Uploaded task (Google ID: {resp['id']})", silent)
 
                 new_rows.append(row)
 
             # ----------------------------
-            # DONE tasks → leave untouched
+            # DONE tasks
             # ----------------------------
             elif google_status == "done":
                 new_rows.append(row)
 
             else:
-                # Any other unknown status → leave
                 new_rows.append(row)
 
         except Exception as e:
-            print(f"❌ Error processing task '{title}' for {user_id}: {e}")
+            log(f"❌ Error processing task '{title}' for {user_id}: {e}", silent)
             new_rows.append(row)
 
     # ----------------------------
@@ -171,9 +196,10 @@ def upload_pending_tasks():
         writer.writerows(new_rows)
 
     if updated_any:
-        print("\n✔ tasks.csv synced and cleaned.")
+        log("\n✔ tasks.csv synced and cleaned.", silent)
     else:
-        print("\nNothing updated.")
+        log("\nNothing updated.", silent)
+
 
 # ----------------------------
 # CLI entry
