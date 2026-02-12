@@ -1,17 +1,48 @@
+# test_intent_engine.py
+import time
 from intent_engine import ai_thought
 
-user_id = "user_7416057134"
+USER_ID = "user_7416057134"
 
-print("🤖 AI Assistant Started. Press Ctrl+C to quit.\n")
+def print_result(msg, result, start_time):
+    elapsed = time.time() - start_time
+    print(f"\nYou: {msg}")
+    
+    # Handle if result is a dict (from ensemble) or just a string
+    if isinstance(result, dict):
+        response_text = result.get("response_text") or "<No text returned>"
+        action = result.get("action", "chat")
+        print(f"AI reply (time taken: {elapsed:.3f}s) | action: {action}")
+        print(response_text)
+    else:
+        print(f"AI reply (time taken: {elapsed:.3f}s):")
+        print(result)
+    
+    print("-" * 60)
 
-try:
+
+def main():
+    print("=== Intent Engine Test ===")
+    print("Type messages to simulate user input.\n")
+    print("Special test case: type 'I already did this' to mark task completed.\n")
+
     while True:
-        message = input("You: ").strip()
-        if not message:
-            continue  # skip empty messages
+        try:
+            msg = input("You: ").strip()
+            if not msg:
+                continue
 
-        response = ai_thought(user_id, message)
-        print("🤖 Assistant:", response)
+            start_time = time.time()
+            result = ai_thought(USER_ID, msg)
+            print_result(msg, result, start_time)
 
-except KeyboardInterrupt:
-    print("\n👋 Goodbye!")
+        except KeyboardInterrupt:
+            print("\nStopped.")
+            break
+        except Exception as e:
+            print("Error:", e)
+            break
+
+
+if __name__ == "__main__":
+    main()

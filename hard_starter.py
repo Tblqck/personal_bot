@@ -11,9 +11,13 @@ from openrouter import OpenRouter
 # -----------------------
 
 TASKS_CSV = "tasks.csv"
-REMINDERS_QUEUE_CSV = "reminders_sent.csv"
 
-REMINDER_MINUTES = {30, 10, 1}
+# ✅ renamed (this is the QUEUE, not the sent log)
+REMINDERS_QUEUE_CSV = "reminders_queue.csv"
+
+# ✅ use list, not set (deterministic order)
+REMINDER_MINUTES = [30, 10, 1]
+
 WINDOW_SECONDS = 30   # allow small clock drift (±30s)
 
 # -----------------------
@@ -132,10 +136,6 @@ def generate_ai_reminder(task_title, ai_comment="", minutes_left=None):
 
 
 def should_trigger(minutes_left, target_minute):
-    """
-    Fire only when we are inside a small window around
-    the target minute (30, 10, 1).
-    """
     target_seconds = target_minute * 60
     current_seconds = int(minutes_left * 60)
 
@@ -237,10 +237,6 @@ def run_reminder_ai():
 
     print(f"Produced {produced} reminder(s).")
 
-
-# -----------------------
-# Stand-alone
-# -----------------------
 
 if __name__ == "__main__":
     run_reminder_ai()

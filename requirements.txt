@@ -5,3 +5,4 @@ pytz
 dateparser
 OpenRouter
 nest_asyncio
+streamlit
