@@ -3,3 +3,4 @@ safe_keep/client.json
 __pycache__/
 venv/
 *.pyc
+.aider*
