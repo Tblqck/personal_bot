@@ -4,8 +4,8 @@ from datetime import datetime
 import pytz
 from list_fun import get_user_task_list, load_all_tasks  # replace your_module_name with the filename if needed
 
-USER_ID = "user_7416057134"
-USER_TZ = "Africa/Lagos"
+USER_ID = "user_1249752083"
+USER_TZ = "Europe/Athens"
 
 # -----------------------
 # Optional: Seed some test tasks if CSV is empty
@@ -27,12 +27,13 @@ if not load_all_tasks():
 # Test messages
 # -----------------------
 test_messages = [
-    "Tasks due today",
-    "Call Mom on Sunday",
-    "Show all",
-    "Meeting this afternoon",
-    "show me all task for saturday",
-    "which task do i have for the week"
+    
+    "what task do i have pending",
+    "what are my pending task",
+    "do i have any pending task",
+    "what task am i yet to do",
+    
+    "what task do i have today"
 ]
 
 # -----------------------

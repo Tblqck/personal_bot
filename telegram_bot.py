@@ -1,3 +1,4 @@
+# main_telegram_bot.py
 import os
 import csv
 import json
@@ -10,21 +11,18 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from muster_point import handle_user_message
 from hard_starter import run_reminder_ai
 from sync_google_tasks_to_csv import sync_user_tasks_to_csv
+from daily_morning_reminder_openrouter import run_daily_morning_reminder  # <-- import daily summary
 from config import DATABASE_FILE
-
 
 # -------------------------------------------------
 # env
 # -------------------------------------------------
 load_dotenv()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN2")
 if not BOT_TOKEN:
     raise ValueError("🚨 BOT_TOKEN2 is not set!")
 
-# ✅ this is now the queue file
 REMINDERS_QUEUE_CSV = "reminders_queue.csv"
-
 
 # -------------------------------------------------
 # Telegram handlers
@@ -51,7 +49,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------
-# Sender loop (CSV is the drop-box queue)
+# Sender loop
 # -------------------------------------------------
 async def send_reminders_loop(app):
     while True:
@@ -85,18 +83,14 @@ async def send_reminders_loop(app):
                         chat_id=int(user_id),
                         text=message
                     )
-
                     print(f"✅ Sent reminder to {user_id}")
 
                 except Exception as e:
                     print(f"❌ Failed to send reminder to {user_id}: {e}")
-
                     reminder["user_id"] = user_id
                     remaining_rows.append(reminder)
 
-            # ✅ VERY IMPORTANT: keep original schema
             fieldnames = rows[0].keys()
-
             with open(REMINDERS_QUEUE_CSV, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
@@ -118,15 +112,25 @@ async def run_reminder_engine_loop():
             run_reminder_ai()
         except Exception as e:
             print("❌ reminder engine crashed:", e)
-
         await asyncio.sleep(60)
+
+
+# -------------------------------------------------
+# Daily morning summary loop
+# -------------------------------------------------
+async def daily_morning_summary_loop():
+    while True:
+        try:
+            run_daily_morning_reminder()
+        except Exception as e:
+            print("❌ daily morning reminder crashed:", e)
+        await asyncio.sleep(60)  # runs every 1 min, script itself ensures 1 message/day
 
 
 # -------------------------------------------------
 # periodic Google Tasks → CSV sync loop
 # -------------------------------------------------
 async def sync_google_tasks_loop():
-
     while True:
         try:
             if not os.path.exists(DATABASE_FILE):
@@ -137,10 +141,8 @@ async def sync_google_tasks_loop():
                 db = json.load(f)
 
             for user_key, data in db.items():
-
                 if not isinstance(data, dict):
                     continue
-
                 try:
                     count = sync_user_tasks_to_csv(user_key)
                     print(f"🔄 synced {count} tasks for {user_key}")
@@ -166,15 +168,15 @@ def main():
     app.add_handler(CommandHandler("connect", handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🤖 Telegram bot running with reminders and background sync...")
+    print("🤖 Telegram bot running with reminders, daily summaries, and background sync...")
 
     async def start_background_tasks():
         asyncio.create_task(run_reminder_engine_loop())
         asyncio.create_task(send_reminders_loop(app))
         asyncio.create_task(sync_google_tasks_loop())
+        asyncio.create_task(daily_morning_summary_loop())  # <-- add daily summary loop
 
     asyncio.get_event_loop().create_task(start_background_tasks())
-
     app.run_polling()
 
 

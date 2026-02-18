@@ -6,3 +6,4 @@ dateparser
 OpenRouter
 nest_asyncio
 streamlit
+httpx==0.23.3
