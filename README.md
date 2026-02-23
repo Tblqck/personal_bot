@@ -1,6 +1,4 @@
-Absolutely! Here’s a **full, ready-to-copy `README.md`** for your `personal_bot` repo. It’s structured professionally, explains the bot, its features, data use, installation, and OAuth flow, and can serve as the homepage link for Google OAuth verification.
 
-````markdown
 # Personal Tasks Bot
 
 **Personal Tasks Bot** is a Telegram bot that allows users to manage their Google Tasks directly from Telegram. It also integrates with Google Calendar to track task times accurately.  
@@ -28,7 +26,6 @@ This project is a personal project and is **not affiliated with any company**.
 - No user data is shared with third parties.
 - All task data remains local to the bot.
 
----
 
 ## Requirements
 
